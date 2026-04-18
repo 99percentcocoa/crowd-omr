@@ -1,16 +1,25 @@
 import os
 import httpx
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
 
+EXOTEL_ACCOUNT_SID = os.getenv("EXOTEL_ACCOUNT_SID")
+EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
+EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
+EXOTEL_SUBDOMAIN = os.getenv("EXOTEL_SUBDOMAIN")
+EXOTEL_FROM_NUMBER = os.getenv("EXOTEL_FROM_NUMBER")
+
 class ExotelClient:
     def __init__(self):
-        self.account_sid = os.getenv("EXOTEL_ACCOUNT_SID")
-        self.api_key = os.getenv("EXOTEL_API_KEY")
-        self.api_token = os.getenv("EXOTEL_API_TOKEN")
-        self.sender_id = os.getenv("EXOTEL_SENDER_ID")
-        self.base_url = f"https://api.exotel.com/v1/Accounts/{self.account_sid}/Sms/send.json"
+        self.account_sid = EXOTEL_ACCOUNT_SID
+        self.api_key = EXOTEL_API_KEY
+        self.api_token = EXOTEL_API_TOKEN
+        self.base_url = (
+            f"https://{self.api_key}:{self.api_token}@{EXOTEL_SUBDOMAIN}"
+            f"/v2/accounts/{self.account_sid}/messages"
+        )
 
     async def send_whatsapp_message(self, to_number: str, text: str, media_url: str = None):
         """
@@ -18,22 +27,41 @@ class ExotelClient:
         Using Exotel Campaign API / SMS API with WhatsApp channel.
         """
         auth = (self.api_key, self.api_token)
-        payload = {
-            "From": self.sender_id,
-            "To": to_number,
-            "Body": text,
-        }
         
-        # Exotel might use different parameter for WhatsApp or media based on specific API version
-        # We will include basic payload for MVP
         if media_url:
-            payload["MediaUrl"] = media_url
+            content = {
+                "type": "image",
+                "image": {
+                    "link": media_url,
+                    "caption": text
+                }
+            }
+        else:
+            content = {
+                "type": "text",
+                "text": {
+                    "body": text
+                }
+            }
+
+        payload = json.dumps({
+            "whatsapp": {
+                "messages": [
+                    {
+                        "from": EXOTEL_FROM_NUMBER,
+                        "to": to_number,
+                        "content": content
+                    }
+                ]
+            }
+        })
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 self.base_url,
                 auth=auth,
-                data=payload
+                headers={"Content-Type": "application/json"},
+                content=payload
             )
             try:
                 response.raise_for_status()
