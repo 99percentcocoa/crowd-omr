@@ -80,6 +80,19 @@ def build_media_url(image_ref: str) -> str:
     return f"{BASE_IMAGE_URL}/{filename}"
 
 
+def build_status_message(db: Session) -> str:
+    pending_count = db.query(Worksheet).filter(Worksheet.status == "pending").count()
+    assigned_count = db.query(Worksheet).filter(Worksheet.status == "assigned").count()
+    completed_count = db.query(Worksheet).filter(Worksheet.status == "completed").count()
+
+    return (
+        "Server is live.\n"
+        f"Unassigned worksheets: {pending_count}\n"
+        f"Assigned worksheets: {assigned_count}\n"
+        f"Checked worksheets: {completed_count}"
+    )
+
+
 @app.post("/webhook")
 async def exotel_webhook(
     request: Request,
@@ -115,6 +128,14 @@ async def exotel_webhook(
     text_body = ""
     if content.get("type") == "text":
         text_body = content.get("text", {}).get("body", "").strip()
+
+    if text_body.lower() == "status":
+        logger.info("Status requested by sender=%s", sender_number)
+        await exotel_client.send_whatsapp_message(
+            sender_number,
+            build_status_message(db),
+        )
+        return Response(content="OK")
     
     # Check if user has an assigned worksheet
     worksheet = db.query(Worksheet).filter(
