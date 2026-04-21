@@ -3,7 +3,8 @@ from typing import Tuple
 
 
 HEADER_PATTERN = re.compile(r"^\s*उत्तरे\s*:\s*$")
-ANSWER_PATTERN = re.compile(r"^\s*(\d+)\s*:\s*([ABCDabcd]?)\s*$")
+ANSWER_PATTERN = re.compile(r"^\s*(\d+)\s*:\s*(\S+)\s*$")
+VALID_OPTIONS = {"A", "B", "C", "D"}
 
 
 def validate_and_parse_template_reply(
@@ -16,7 +17,7 @@ def validate_and_parse_template_reply(
     Rules:
     - Header must be present as: "उत्तरे:" (whitespace variations allowed).
     - Questions must appear in order from 1..question_count.
-    - Each answer line format must remain: "N: X" where X is A/B/C/D or empty.
+    - Each answer line format must remain: "N: X" where X is only A/B/C/D.
     - Extra non-whitespace lines are rejected.
     """
     answers = {str(i): "" for i in range(1, question_count + 1)}
@@ -44,7 +45,11 @@ def validate_and_parse_template_reply(
         if int(q_num) != expected_q:
             return False, answers, "Question numbers are missing or out of order"
 
-        answers[q_num] = option.upper() if option else ""
+        normalized_option = option.strip().upper()
+        if normalized_option not in VALID_OPTIONS:
+            return False, answers, f"Invalid option for question {q_num}: use only A/B/C/D"
+
+        answers[q_num] = normalized_option
         expected_q += 1
 
     return True, answers, ""
