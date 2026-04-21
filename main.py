@@ -1,5 +1,4 @@
 import os
-import re
 from typing import Optional
 
 from fastapi import FastAPI, Form, Depends, HTTPException, Request, Response
@@ -9,6 +8,7 @@ from pydantic import BaseModel
 from database import Base, engine, get_db
 from models import Worksheet
 from exotel import exotel_client
+from message_validator import validate_and_parse_template_reply
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,7 +23,7 @@ ALLOWED_USERS = set(os.getenv("ALLOWED_USERS", "").split(","))
 BASE_IMAGE_URL = os.getenv("BASE_IMAGE_URL", "").strip().rstrip("/")
 
 # Default template format (1 question per line)
-TEMPLATE = "Answers:\n1: \n2: \n3: \n4: \n5: \n6: \n7: \n8: \n9: \n10: \n11: \n12: \n13: \n14: \n15: \n16: \n17: \n18: \n19: \n20: "
+TEMPLATE = "उत्तरे:\n1: \n2: \n3: \n4: \n5: \n6: \n7: \n8: \n9: \n10: \n11: \n12: \n13: \n14: \n15: \n16: \n17: \n18: \n19: \n20: "
 QUESTION_COUNT = 20
 
 
@@ -38,28 +38,6 @@ def build_media_url(image_ref: str) -> str:
 
     return f"{BASE_IMAGE_URL}/{filename}"
 
-
-def parse_answers(text_body: str, question_count: int = QUESTION_COUNT) -> dict[str, str]:
-    """Parse user response text into {"1": "A", ..., "N": ""} format."""
-    answers = {str(i): "" for i in range(1, question_count + 1)}
-
-    # Accept formats like: "1: A", "2) b", "3 - C", "4.D".
-    pattern = re.compile(r"^\s*(\d+)\s*[:)\-.]\s*([ABCDabcd]?)\s*$")
-
-    for raw_line in text_body.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        match = pattern.match(line)
-        if not match:
-            continue
-
-        q_num, option = match.groups()
-        if q_num in answers:
-            answers[q_num] = option.upper() if option else ""
-
-    return answers
 
 @app.post("/webhook")
 async def exotel_webhook(
@@ -98,29 +76,49 @@ async def exotel_webhook(
         Worksheet.assigned_to == sender_number,
         Worksheet.status == "assigned"
     ).first()
+
+    skipped_worksheet_id = None
     
     if worksheet:
         # We assume the user replied with the answers
         if text_body.lower() in ['cancel', 'skip']:
+            skipped_worksheet_id = worksheet.id
             worksheet.status = "pending"
             worksheet.assigned_to = None
             db.commit()
-            await exotel_client.send_whatsapp_message(sender_number, "Worksheet skipped. Send any message to get a new one.")
-            return Response(content="Skipped")
+            # await exotel_client.send_whatsapp_message(sender_number, "Worksheet skipped. Sending next worksheet...")
+        else:
+            is_valid, parsed_answers, error_reason = validate_and_parse_template_reply(
+                text_body,
+                QUESTION_COUNT,
+            )
+            if not is_valid:
+                await exotel_client.send_whatsapp_message(
+                    sender_number,
+                    "उत्तर नमुना जसाच्या तसा ठेवा आणि फक्त उत्तरे भरा. कृपया पुन्हा पाठवा."
+                )
+                await exotel_client.send_whatsapp_message(sender_number, TEMPLATE)
+                return Response(content=f"Invalid template: {error_reason}", status_code=200)
+
+            worksheet.results = {
+                "answers": parsed_answers,
+            }
+            worksheet.status = "completed"
+            db.commit()
+
+            await exotel_client.send_whatsapp_message(sender_number, "धन्यवाद! पुढची कार्यपत्रिका पाठवली जात आहे...")
             
-        worksheet.results = {
-            "answers": parse_answers(text_body),
-        }
-        worksheet.status = "completed"
-        db.commit()
-        
-        await exotel_client.send_whatsapp_message(sender_number, "Results saved! Sending next worksheet...")
-    
     # Send next worksheet
-    next_worksheet = db.query(Worksheet).filter(Worksheet.status == "pending").first()
+    next_worksheet_query = db.query(Worksheet).filter(Worksheet.status == "pending")
+    if skipped_worksheet_id is not None:
+        next_worksheet_query = next_worksheet_query.filter(Worksheet.id != skipped_worksheet_id)
+
+    next_worksheet = next_worksheet_query.first()
+    if not next_worksheet and skipped_worksheet_id is not None:
+        next_worksheet = db.query(Worksheet).filter(Worksheet.status == "pending").first()
     
     if not next_worksheet:
-        await exotel_client.send_whatsapp_message(sender_number, "No pending worksheets available.")
+        await exotel_client.send_whatsapp_message(sender_number, "उर्वरित कार्यपत्रके उपलब्ध नाहीत. धन्यवाद!")
         return Response(content="Done")
         
     next_worksheet.status = "assigned"
@@ -132,8 +130,9 @@ async def exotel_webhook(
     
     await exotel_client.send_whatsapp_message(
         sender_number,
-        "Please grade this worksheet. Use the answer template in the next message."
-        " Fill it in and reply.",
+        "कृपया हे worksheet तपासा. पुढच्या मेसेजमध्ये दिलेला उत्तर नमुना वापरून (copy-paste करून) तुमचे उत्तर पाठवा. \n",
+        "कार्यपत्रिका तपासू शकत नसल्याल 'skip' असे लिहून पाठवा. \n",
+        "उदा. \n 1: A\n2: B\n3: C\n... \n20: D",
         media_url=media_url
     )
 
