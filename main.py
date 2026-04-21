@@ -1,4 +1,7 @@
 import os
+import time
+import uuid
+import logging
 from typing import Optional
 
 from fastapi import FastAPI, Form, Depends, HTTPException, Request, Response
@@ -10,8 +13,12 @@ from models import Worksheet
 from exotel import exotel_client
 from message_validator import validate_and_parse_template_reply
 from dotenv import load_dotenv
+from logging_config import setup_logging, set_request_id, clear_request_id
 
 load_dotenv()
+setup_logging()
+
+logger = logging.getLogger(__name__)
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -27,6 +34,39 @@ TEMPLATE = "उत्तरे:\n1: \n2: \n3: \n4: \n5: \n6: \n7: \n8: \n9: \n10
 QUESTION_COUNT = 20
 
 
+@app.middleware("http")
+async def logging_middleware(request: Request, call_next):
+    request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+    start = time.perf_counter()
+    set_request_id(request_id)
+
+    logger.info("Incoming request %s %s", request.method, request.url.path)
+
+    try:
+        response = await call_next(request)
+        duration_ms = (time.perf_counter() - start) * 1000
+        response.headers["x-request-id"] = request_id
+        logger.info(
+            "Request completed %s %s status=%s duration_ms=%.2f",
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration_ms,
+        )
+        return response
+    except Exception:
+        duration_ms = (time.perf_counter() - start) * 1000
+        logger.exception(
+            "Unhandled error for %s %s duration_ms=%.2f",
+            request.method,
+            request.url.path,
+            duration_ms,
+        )
+        raise
+    finally:
+        clear_request_id()
+
+
 def build_media_url(image_ref: str) -> str:
     """Build a public image URL from a stored worksheet reference."""
     if image_ref.startswith("http://") or image_ref.startswith("https://"):
@@ -34,6 +74,7 @@ def build_media_url(image_ref: str) -> str:
 
     filename = os.path.basename(image_ref)
     if not BASE_IMAGE_URL:
+        logger.error("Unable to build media URL because BASE_IMAGE_URL is missing")
         raise HTTPException(status_code=500, detail="BASE_URL/BASE_IMAGE_URL is not configured")
 
     return f"{BASE_IMAGE_URL}/{filename}"
@@ -50,20 +91,24 @@ async def exotel_webhook(
     try:
         data = await request.json()
     except Exception:
+        logger.warning("Received invalid JSON payload on webhook")
         return Response(content="Invalid JSON", status_code=400)
         
     messages = data.get("whatsapp", {}).get("messages", [])
     if not messages:
+        logger.warning("Webhook payload has no messages")
         return Response(content="No messages found", status_code=400)
         
     msg = messages[0]
     sender_number = msg.get("from", "").strip()
     
     if not sender_number:
+        logger.warning("Webhook payload missing sender")
         return Response(content="Missing sender", status_code=400)
     
     # Check allowlist
     if sender_number not in ALLOWED_USERS:
+        logger.info("Sender not in allowlist: %s", sender_number)
         return Response(content="OK")
         
     content = msg.get("content", {})
@@ -77,6 +122,12 @@ async def exotel_webhook(
         Worksheet.status == "assigned"
     ).first()
 
+    logger.info(
+        "Processing webhook message from sender=%s has_assigned_worksheet=%s",
+        sender_number,
+        bool(worksheet),
+    )
+
     skipped_worksheet_id = None
     
     if worksheet:
@@ -86,6 +137,7 @@ async def exotel_webhook(
             worksheet.status = "pending"
             worksheet.assigned_to = None
             db.commit()
+            logger.info("Worksheet skipped worksheet_id=%s sender=%s", skipped_worksheet_id, sender_number)
             # await exotel_client.send_whatsapp_message(sender_number, "Worksheet skipped. Sending next worksheet...")
         else:
             is_valid, parsed_answers, error_reason = validate_and_parse_template_reply(
@@ -93,6 +145,12 @@ async def exotel_webhook(
                 QUESTION_COUNT,
             )
             if not is_valid:
+                logger.info(
+                    "Invalid worksheet reply worksheet_id=%s sender=%s reason=%s",
+                    worksheet.id,
+                    sender_number,
+                    error_reason,
+                )
                 await exotel_client.send_whatsapp_message(
                     sender_number,
                     "उत्तर नमुना जसाच्या तसा ठेवा आणि फक्त उत्तरे भरा. कृपया पुन्हा पाठवा."
@@ -106,6 +164,8 @@ async def exotel_webhook(
             worksheet.status = "completed"
             db.commit()
 
+            logger.info("Worksheet completed worksheet_id=%s sender=%s", worksheet.id, sender_number)
+
             await exotel_client.send_whatsapp_message(sender_number, "धन्यवाद! पुढची कार्यपत्रिका पाठवली जात आहे...")
             
     # Send next worksheet
@@ -118,21 +178,28 @@ async def exotel_webhook(
         next_worksheet = db.query(Worksheet).filter(Worksheet.status == "pending").first()
     
     if not next_worksheet:
+        logger.info("No pending worksheets left for sender=%s", sender_number)
         await exotel_client.send_whatsapp_message(sender_number, "उर्वरित कार्यपत्रके उपलब्ध नाहीत. धन्यवाद!")
         return Response(content="Done")
         
     next_worksheet.status = "assigned"
     next_worksheet.assigned_to = sender_number
     db.commit()
+
+    logger.info("Worksheet assigned worksheet_id=%s sender=%s", next_worksheet.id, sender_number)
     
     # Construct media URL
     media_url = build_media_url(next_worksheet.image_path)
+    worksheet_prompt = (
+        "कृपया हे worksheet तपासा. पुढच्या मेसेजमध्ये दिलेला उत्तर नमुना वापरून "
+        "(copy-paste करून) तुमचे उत्तर पाठवा.\n"
+        "कार्यपत्रिका तपासू शकत नसल्याल 'skip' असे लिहून पाठवा.\n"
+        "उदा.\n1: A\n2: B\n3: C\n...\n20: D"
+    )
     
     await exotel_client.send_whatsapp_message(
         sender_number,
-        "कृपया हे worksheet तपासा. पुढच्या मेसेजमध्ये दिलेला उत्तर नमुना वापरून (copy-paste करून) तुमचे उत्तर पाठवा. \n",
-        "कार्यपत्रिका तपासू शकत नसल्याल 'skip' असे लिहून पाठवा. \n",
-        "उदा. \n 1: A\n2: B\n3: C\n... \n20: D",
+        worksheet_prompt,
         media_url=media_url
     )
 
@@ -155,6 +222,11 @@ def add_worksheets(req: AddWorksheetsRequest, db: Session = Depends(get_db)):
     """
     added = 0
     seen_refs = set()
+    logger.info(
+        "Admin worksheet import started directory_path=%s file_list_path=%s",
+        req.directory_path,
+        req.file_list_path,
+    )
     if req.directory_path:
         if not os.path.isdir(req.directory_path):
             raise HTTPException(status_code=400, detail="Invalid directory path")
@@ -201,4 +273,5 @@ def add_worksheets(req: AddWorksheetsRequest, db: Session = Depends(get_db)):
                     added += 1
                 
     db.commit()
+    logger.info("Admin worksheet import completed added_count=%s", added)
     return {"message": f"Added {added} new worksheets"}
