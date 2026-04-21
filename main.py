@@ -132,7 +132,7 @@ async def exotel_webhook(
     
     if worksheet:
         # We assume the user replied with the answers
-        if text_body.lower() in ['cancel', 'skip']:
+        if text_body.lower() in ['cancel', 'skip', 'next']:
             skipped_worksheet_id = worksheet.id
             worksheet.status = "pending"
             worksheet.assigned_to = None
