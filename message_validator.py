@@ -10,7 +10,7 @@ VALID_OPTIONS = {"A", "B", "C", "D"}
 def validate_and_parse_template_reply(
     text_body: str,
     question_count: int,
-) -> Tuple[bool, dict[str, str], str]:
+) -> Tuple[bool, dict[str, str], str, str]:
     """
     Validate a user reply against the fixed answer template and parse answers.
 
@@ -25,31 +25,31 @@ def validate_and_parse_template_reply(
     meaningful_lines = [line for line in text_body.splitlines() if line.strip()]
 
     if not meaningful_lines:
-        return False, answers, "Empty response"
+        return False, answers, "Empty response", ""
 
     if not HEADER_PATTERN.match(meaningful_lines[0]):
-        return False, answers, "Missing or invalid template header"
+        return False, answers, "Missing or invalid template header", meaningful_lines[0]
 
     answer_lines = meaningful_lines[1:]
 
     if len(answer_lines) != question_count:
-        return False, answers, "Incorrect number of answer lines"
+        return False, answers, "Incorrect number of answer lines", ""
 
     expected_q = 1
     for line in answer_lines:
         match = ANSWER_PATTERN.match(line)
         if not match:
-            return False, answers, "Invalid answer line format"
+            return False, answers, "Invalid answer line format", line
 
         q_num, option = match.groups()
         if int(q_num) != expected_q:
-            return False, answers, "Question numbers are missing or out of order"
+            return False, answers, "Question numbers are missing or out of order", line
 
         normalized_option = option.strip().upper()
         if normalized_option not in VALID_OPTIONS:
-            return False, answers, f"Invalid option for question {q_num}: use only A/B/C/D"
+            return False, answers, f"Invalid option for question {q_num}: use only A/B/C/D", line
 
         answers[q_num] = normalized_option
         expected_q += 1
 
-    return True, answers, ""
+    return True, answers, "", ""

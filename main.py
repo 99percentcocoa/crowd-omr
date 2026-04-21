@@ -140,7 +140,7 @@ async def exotel_webhook(
             logger.info("Worksheet skipped worksheet_id=%s sender=%s", skipped_worksheet_id, sender_number)
             # await exotel_client.send_whatsapp_message(sender_number, "Worksheet skipped. Sending next worksheet...")
         else:
-            is_valid, parsed_answers, error_reason = validate_and_parse_template_reply(
+            is_valid, parsed_answers, error_reason, error_line = validate_and_parse_template_reply(
                 text_body,
                 QUESTION_COUNT,
             )
@@ -151,9 +151,16 @@ async def exotel_webhook(
                     sender_number,
                     error_reason,
                 )
+                error_message = (
+                    "उत्तर नमुना जसाच्या तसा ठेवा आणि फक्त उत्तरे भरा. कृपया पुन्हा पाठवा.\n"
+                    f"कारण: {error_reason}"
+                )
+                if error_line:
+                    error_message += f"\nचुकीची ओळ: >>> {error_line} <<<"
+
                 await exotel_client.send_whatsapp_message(
                     sender_number,
-                    "उत्तर नमुना जसाच्या तसा ठेवा आणि फक्त उत्तरे भरा. कृपया पुन्हा पाठवा."
+                    error_message,
                 )
                 await exotel_client.send_whatsapp_message(sender_number, TEMPLATE)
                 return Response(content=f"Invalid template: {error_reason}", status_code=200)
